@@ -9,6 +9,7 @@ const User = require("../models/user.model");
 const Transaction = require("../models/transaction.model");
 const Withdrawal = require("../models/withdrawal.model");
 const PaymentLink = require("../models/paymentLink.model");
+const Order = require("../models/order.model");
 const paymentController = require("../controllers/paymentController");
 
 
@@ -168,6 +169,31 @@ router.post("/payu/success", async (req, res) => {
             amount: Number(paymentLink.amount),
             status: "Completed",
           });
+        } else {
+          const apiOrder = await Order.findOne({ orderId: linkId });
+          if (apiOrder) {
+            const creditedAmount = Number(apiOrder.amount) / 100;
+
+            apiOrder.status = "paid";
+            apiOrder.paymentId = mihpayid || txnid;
+            apiOrder.paymentStatus = "captured";
+            apiOrder.amountPaid = Number(apiOrder.amount);
+            apiOrder.paidAt = new Date();
+            await apiOrder.save();
+
+            await User.findByIdAndUpdate(apiOrder.merchantId, {
+              $inc: { balance: creditedAmount },
+            });
+
+            await Transaction.create({
+              userId: apiOrder.merchantId,
+              transactionId: mihpayid || txnid,
+              description: `API order payment ${apiOrder.orderId} via PayU`,
+              type: "Credit",
+              amount: creditedAmount,
+              status: "Completed",
+            });
+          }
         }
         return res.redirect(`${frontendUrl}/payment/success?linkId=${linkId}`);
       } else if (flowType === "qr" && linkId) {
@@ -611,7 +637,33 @@ router.get("/checkout/:linkId", async (req, res) => {
     const paymentLink = await PaymentLink.findOne({ linkId }).populate("userId", "fullName email");
 
     if (!paymentLink) {
-      return res.status(404).json({ message: "Payment link not found" });
+      const apiOrder = await Order.findOne({ orderId: linkId }).populate("merchantId", "fullName email");
+
+      if (!apiOrder) {
+        return res.status(404).json({ message: "Payment link not found" });
+      }
+
+      if (apiOrder.status === "paid") {
+        return res.status(400).json({ message: "Payment already completed", status: "paid" });
+      }
+
+      if (["expired", "refunded"].includes(apiOrder.status)) {
+        return res.status(400).json({ message: "Payment link is no longer valid", status: apiOrder.status });
+      }
+
+      return res.json({
+        success: true,
+        paymentLink: {
+          linkId: apiOrder.orderId,
+          amount: Number(apiOrder.amount) / 100,
+          description: apiOrder.notes?.description || `Order payment ${apiOrder.orderId}`,
+          customerName: apiOrder.customerName || "Customer",
+          customerEmail: apiOrder.customerEmail || "customer@example.com",
+          merchant: apiOrder.merchantId?.fullName || "Merchant",
+          merchantEmail: apiOrder.merchantId?.email,
+          dueDate: apiOrder.expiredAt || null,
+        },
+      });
     }
 
     if (paymentLink.status === "paid") {
@@ -658,31 +710,62 @@ router.post("/checkout/create-order", async (req, res) => {
 
     const paymentLink = await PaymentLink.findOne({ linkId });
 
-    if (!paymentLink) {
-      return res.status(404).json({ message: "Payment link not found" });
-    }
+    let result;
 
-    if (paymentLink.status !== "pending") {
-      return res.status(400).json({ message: "Payment link is no longer valid" });
-    }
+    if (paymentLink) {
+      if (paymentLink.status !== "pending") {
+        return res.status(400).json({ message: "Payment link is no longer valid" });
+      }
 
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
-    const result = await createGatewayOrder(paymentLink.amount, {
-      receipt: `checkout_${linkId}`,
-      productinfo: paymentLink.description || "Payment",
-      firstname: paymentLink.customerName || "Customer",
-      email: paymentLink.customerEmail || "customer@example.com",
-      udf1: paymentLink.userId?.toString() || "",
-      udf2: linkId,
-      udf3: "checkout",
-      surl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/success`,
-      furl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/failure`,
-      notes: { linkId, customerEmail: paymentLink.customerEmail },
-    });
+      result = await createGatewayOrder(paymentLink.amount, {
+        receipt: `checkout_${linkId}`,
+        productinfo: paymentLink.description || "Payment",
+        firstname: paymentLink.customerName || "Customer",
+        email: paymentLink.customerEmail || "customer@example.com",
+        udf1: paymentLink.userId?.toString() || "",
+        udf2: linkId,
+        udf3: "checkout",
+        surl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/success`,
+        furl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/failure`,
+        notes: { linkId, customerEmail: paymentLink.customerEmail },
+      });
 
-    if (result.gateway === "razorpay" && result.order) {
-      paymentLink.razorpayOrderId = result.order.id;
-      await paymentLink.save();
+      if (result.gateway === "razorpay" && result.order) {
+        paymentLink.razorpayOrderId = result.order.id;
+        await paymentLink.save();
+      }
+    } else {
+      const apiOrder = await Order.findOne({ orderId: linkId });
+      if (!apiOrder) {
+        return res.status(404).json({ message: "Payment link not found" });
+      }
+
+      if (["paid", "expired", "refunded"].includes(apiOrder.status)) {
+        return res.status(400).json({ message: "Payment link is no longer valid" });
+      }
+
+      result = await createGatewayOrder(Number(apiOrder.amount) / 100, {
+        receipt: apiOrder.receipt || `checkout_${linkId}`,
+        productinfo: apiOrder.notes?.description || "Order Payment",
+        firstname: apiOrder.customerName || "Customer",
+        email: apiOrder.customerEmail || "customer@example.com",
+        udf1: apiOrder.merchantId?.toString() || "",
+        udf2: linkId,
+        udf3: "checkout",
+        surl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/success`,
+        furl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/failure`,
+        notes: { ...apiOrder.notes, linkId, customerEmail: apiOrder.customerEmail },
+      });
+
+      const nextNotes = { ...(apiOrder.notes || {}) };
+      if (result.gateway === "razorpay" && result.order) {
+        nextNotes.razorpayOrderId = result.order.id;
+      }
+
+      apiOrder.notes = nextNotes;
+      apiOrder.status = "attempted";
+      apiOrder.attempts = (apiOrder.attempts || 0) + 1;
+      await apiOrder.save();
     }
 
     res.json({
@@ -714,7 +797,8 @@ router.post("/checkout/verify", async (req, res) => {
     }
 
     const paymentLink = await PaymentLink.findOne({ linkId });
-    if (!paymentLink) {
+    const apiOrder = paymentLink ? null : await Order.findOne({ orderId: linkId });
+    if (!paymentLink && !apiOrder) {
       return res.status(404).json({ success: false, message: "Payment link not found" });
     }
 
@@ -727,26 +811,49 @@ router.post("/checkout/verify", async (req, res) => {
       .digest("hex");
 
     if (expectedSign === razorpay_signature) {
-      // Update payment link
-      paymentLink.status = "paid";
-      paymentLink.razorpayPaymentId = razorpay_payment_id;
-      paymentLink.paidAt = new Date();
-      await paymentLink.save();
+      if (paymentLink) {
+        paymentLink.status = "paid";
+        paymentLink.razorpayPaymentId = razorpay_payment_id;
+        paymentLink.paidAt = new Date();
+        await paymentLink.save();
 
-      // Credit user balance
-      await User.findByIdAndUpdate(paymentLink.userId, {
-        $inc: { balance: Number(paymentLink.amount) },
-      });
+        await User.findByIdAndUpdate(paymentLink.userId, {
+          $inc: { balance: Number(paymentLink.amount) },
+        });
 
-      // Create transaction record
-      await Transaction.create({
-        userId: paymentLink.userId,
-        transactionId: razorpay_payment_id,
-        description: `Payment from ${paymentLink.customerName}`,
-        type: "Credit",
-        amount: Number(paymentLink.amount),
-        status: "Completed",
-      });
+        await Transaction.create({
+          userId: paymentLink.userId,
+          transactionId: razorpay_payment_id,
+          description: `Payment from ${paymentLink.customerName}`,
+          type: "Credit",
+          amount: Number(paymentLink.amount),
+          status: "Completed",
+        });
+      } else {
+        const creditedAmount = Number(apiOrder.amount) / 100;
+
+        apiOrder.status = "paid";
+        apiOrder.paymentId = razorpay_payment_id;
+        apiOrder.signature = razorpay_signature;
+        apiOrder.signatureVerified = true;
+        apiOrder.paymentStatus = "captured";
+        apiOrder.amountPaid = Number(apiOrder.amount);
+        apiOrder.paidAt = new Date();
+        await apiOrder.save();
+
+        await User.findByIdAndUpdate(apiOrder.merchantId, {
+          $inc: { balance: creditedAmount },
+        });
+
+        await Transaction.create({
+          userId: apiOrder.merchantId,
+          transactionId: razorpay_payment_id,
+          description: `API order payment ${apiOrder.orderId}`,
+          type: "Credit",
+          amount: creditedAmount,
+          status: "Completed",
+        });
+      }
 
       return res.json({
         success: true,
