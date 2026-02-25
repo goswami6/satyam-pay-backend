@@ -18,6 +18,7 @@ const PaymentLink = require("../models/paymentLink.model");
 const Order = require("../models/order.model");
 const GatewaySettings = require("../models/gatewaySettings.model");
 const QRCode = require("../models/qrCode.model");
+const Settings = require("../models/settings.model");
 const paymentController = require("../controllers/paymentController");
 
 const resolveGatewaySettingsForVerification = async (gatewayHint) => {
@@ -1109,17 +1110,27 @@ router.post("/checkout/verify", async (req, res) => {
 // ============================
 router.post("/withdraw", async (req, res) => {
   try {
-    const { userId, amount, accountName, accountNumber, ifsc } = req.body;
+    const { userId, amount, accountName, accountNumber, ifsc, bankName } = req.body;
 
     // 1️⃣ Validation
     if (!userId || !amount || !accountName || !accountNumber || !ifsc) {
       return res.status(400).json({ message: "All fields required" });
     }
 
+    // Get payment settings from admin
+    const settings = await Settings.getSettings();
+    const minWithdrawal = settings.minWithdrawal || 50;
+    const maxWithdrawal = settings.maxWithdrawal || 500000;
+    const commissionRate = settings.commissionRate || 2;
+
     const withdrawAmount = Number(amount);
 
-    if (withdrawAmount < 50) {
-      return res.status(400).json({ message: "Minimum withdrawal is ₹50" });
+    if (withdrawAmount < minWithdrawal) {
+      return res.status(400).json({ message: `Minimum payout is ₹${minWithdrawal}` });
+    }
+
+    if (withdrawAmount > maxWithdrawal) {
+      return res.status(400).json({ message: `Maximum payout is ₹${maxWithdrawal.toLocaleString()}` });
     }
 
     const user = await User.findById(userId);
@@ -1127,8 +1138,8 @@ router.post("/withdraw", async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // 2️⃣ Commission calculation (₹0.02 or 1%)
-    const commission = Math.max(0.02, withdrawAmount * 0.01);
+    // 2️⃣ Commission calculation from settings
+    const commission = (withdrawAmount * commissionRate) / 100;
     const total = withdrawAmount + commission;
 
     if (total > user.balance) {
@@ -1147,18 +1158,27 @@ router.post("/withdraw", async (req, res) => {
       accountName,
       accountNumber,
       ifsc,
+      bankName: bankName || "",
       type: "payout",
       status: "Pending"
     });
 
-    // 4️⃣ Create Pending Transaction Record
+    // 4️⃣ Create Pending Transaction Record with full details
     await Transaction.create({
       userId,
       transactionId: withdrawal.withdrawalId,
-      description: `Withdrawal Request to Bank (${accountNumber.slice(-4)})`,
+      description: `Payout Request to ${bankName || "Bank"} (${accountNumber.slice(-4)})`,
       amount: withdrawAmount,
       type: "Debit",
-      status: "Pending"
+      fee: commission,
+      netAmount: total,
+      category: "payout",
+      method: "bank",
+      accountNumber: accountNumber,
+      ifscCode: ifsc,
+      bankName: bankName || "",
+      status: "Pending",
+      notes: `Platform Fee: ${commissionRate}% (₹${commission.toFixed(2)})`
     });
 
     res.json({
@@ -1196,7 +1216,12 @@ router.post("/admin/approve/:id", async (req, res) => {
     }
 
     if (withdrawal.total > user.balance) {
-      return res.status(400).json({ message: "Insufficient balance now" });
+      return res.status(400).json({
+        message: "Insufficient user balance",
+        currentBalance: user.balance,
+        required: withdrawal.total,
+        shortfall: withdrawal.total - user.balance
+      });
     }
 
     // Deduct balance from user wallet

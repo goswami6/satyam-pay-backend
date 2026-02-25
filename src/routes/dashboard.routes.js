@@ -175,14 +175,26 @@ router.get("/recent-transactions/:userId", async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(limit);
 
-    // Format transactions for dashboard
+    // Format transactions for dashboard - include all fields from Transaction model
     const formatted = transactions.map(txn => ({
-      id: txn.transactionId || txn._id,
-      description: txn.description || (txn.type === "Credit" ? "Payment Received" : "Payout"),
+      id: txn._id,
+      _id: txn._id,
+      transactionId: txn.transactionId || txn._id,
+      description: txn.description || txn.customerName || (txn.type === "Credit" ? "Payment Received" : "Payout"),
+      customerName: txn.customerName,
       amount: txn.amount,
+      fee: txn.fee || 0,
+      netAmount: txn.netAmount || txn.amount,
       type: txn.type,
+      category: txn.category || 'other',
+      method: txn.method || 'N/A',
       status: txn.status,
-      date: txn.createdAt
+      bankName: txn.bankName,
+      accountNumber: txn.accountNumber,
+      ifscCode: txn.ifscCode,
+      notes: txn.notes,
+      date: txn.createdAt,
+      createdAt: txn.createdAt
     }));
 
     res.json(formatted);
@@ -235,13 +247,13 @@ router.get("/admin-stats", async (req, res) => {
     // ================= USERS =================
     const totalUsers = await User.countDocuments({ role: "user" });
     const activeUsers = await User.countDocuments({ role: "user", status: "Active" });
-    const newUsersThisMonth = await User.countDocuments({ 
-      role: "user", 
-      createdAt: { $gte: thirtyDaysAgo } 
+    const newUsersThisMonth = await User.countDocuments({
+      role: "user",
+      createdAt: { $gte: thirtyDaysAgo }
     });
-    const newUsersLastMonth = await User.countDocuments({ 
-      role: "user", 
-      createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo } 
+    const newUsersLastMonth = await User.countDocuments({
+      role: "user",
+      createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo }
     });
 
     // ================= TRANSACTIONS =================
@@ -379,14 +391,14 @@ router.get("/admin-stats", async (req, res) => {
         totalTransactions: transTotal,
         transactionCount: transCount,
         transactionChange: calcChange(transRecent, transPrevious),
-        
+
         totalRevenue: revTotal,
         revenueCount: revCount,
         revenueChange: calcChange(revRecent, revPrevious),
-        
+
         totalCustomers: totalCustomers.length,
         customerChange: calcChange(recentCustomers.length, previousCustomers.length),
-        
+
         totalSettlements: settleTotal,
         settlementCount: settleCount,
         settlementChange: calcChange(settleRecent, settlePrevious),

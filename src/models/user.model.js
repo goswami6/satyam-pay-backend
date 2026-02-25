@@ -75,6 +75,12 @@ const userSchema = new mongoose.Schema(
       approvedAt: { type: Date },
     },
 
+    // Profile Image
+    profileImage: {
+      type: String,
+      default: ""
+    },
+
     // Uploaded Documents (legacy)
     aadharFile: {
       type: String,

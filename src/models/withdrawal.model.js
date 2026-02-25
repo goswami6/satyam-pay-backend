@@ -17,6 +17,7 @@ const withdrawalSchema = new mongoose.Schema(
     accountName: String,
     accountNumber: String,
     ifsc: String,
+    bankName: String,
     type: {
       type: String,
       enum: ["withdrawal", "payout"],

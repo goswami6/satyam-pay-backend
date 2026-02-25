@@ -33,9 +33,9 @@ router.post("/forgot-password", async (req, res) => {
 
     if (!user) {
       // Don't reveal if email exists or not for security
-      return res.status(200).json({ 
+      return res.status(200).json({
         success: true,
-        message: "If this email exists, a reset link has been sent" 
+        message: "If this email exists, a reset link has been sent"
       });
     }
 
@@ -97,9 +97,9 @@ router.post("/forgot-password", async (req, res) => {
 
     await transporter.sendMail(mailOptions);
 
-    res.status(200).json({ 
+    res.status(200).json({
       success: true,
-      message: "Password reset link sent to your email" 
+      message: "Password reset link sent to your email"
     });
 
   } catch (error) {
@@ -145,9 +145,9 @@ router.post("/reset-password/:token", async (req, res) => {
 
     await user.save();
 
-    res.status(200).json({ 
+    res.status(200).json({
       success: true,
-      message: "Password reset successful" 
+      message: "Password reset successful"
     });
 
   } catch (error) {
@@ -228,14 +228,56 @@ router.get("/profile/:userId", async (req, res) => {
   }
 });
 
+// Upload Profile Image
+router.post("/profile-image/:userId", upload.single("profileImage"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No image file provided" });
+    }
+
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Save relative path
+    const imagePath = `/uploads/${req.file.filename}`;
+    user.profileImage = imagePath;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: "Profile image updated successfully",
+      profileImage: imagePath
+    });
+  } catch (error) {
+    console.error("Profile image upload error:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Update Profile
 router.put("/profile/:userId", async (req, res) => {
   try {
+    // Only allow safe fields to be updated (not balance, role, email, kyc status)
+    const allowedFields = ['fullName', 'phone', 'companyName', 'companyType'];
+    const updateData = {};
+
+    allowedFields.forEach(field => {
+      if (req.body[field] !== undefined) {
+        updateData[field] = req.body[field];
+      }
+    });
+
     const updatedUser = await User.findByIdAndUpdate(
       req.params.userId,
-      req.body,
+      updateData,
       { new: true }
     ).select("-password");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
     res.json(updatedUser);
 

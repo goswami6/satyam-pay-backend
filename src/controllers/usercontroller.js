@@ -79,6 +79,11 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    // 🔹 Block admin accounts from user login
+    if (user.role === "admin") {
+      return res.status(403).json({ message: "Admin accounts cannot login from User portal. Please use Admin Login." });
+    }
+
     // 🔹 Check account status
     if (user.status === "Suspended") {
       return res.status(403).json({ message: "Account is suspended. Contact support." });
@@ -103,6 +108,7 @@ exports.login = async (req, res) => {
       _id: user._id,
       fullName: user.fullName,
       email: user.email,
+      phone: user.phone,
       role: user.role,
     };
 
@@ -114,6 +120,8 @@ exports.login = async (req, res) => {
       responseData.balance = user.balance;
       responseData.companyName = user.companyName;
       responseData.companyType = user.companyType;
+      responseData.kycStatus = user.kycStatus;
+      responseData.profileImage = user.profileImage;
     }
 
     res.status(200).json({

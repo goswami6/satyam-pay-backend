@@ -2,17 +2,36 @@ const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 const path = require("path");
+const compression = require("compression");
+const helmet = require("helmet");
 const connectDB = require("./config/db");
 const withdrawRoutes = require("./routes/withdraw.routes");
 const transactionRoutes = require("./routes/transaction.routes");
 const adminBulkRoutes = require("./routes/BulkPayout.routes");
 
-
-
 const app = express();
 
 // Connect Database
 connectDB();
+
+// ✅ Production Optimizations
+if (process.env.NODE_ENV === "production") {
+  // Enable gzip compression
+  app.use(compression({
+    level: 6,
+    threshold: 1024, // Only compress responses > 1KB
+    filter: (req, res) => {
+      if (req.headers['x-no-compression']) return false;
+      return compression.filter(req, res);
+    }
+  }));
+
+  // Security headers
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: false
+  }));
+}
 
 // CORS Configuration for Production
 const allowedOrigins = [
@@ -41,14 +60,30 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
-app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
-// ✅ Serve Static Files (uploads folder) - CORS enabled
+// ✅ Logging - minimal in production
+if (process.env.NODE_ENV === "production") {
+  // Only log errors in production
+  app.use(morgan("tiny", {
+    skip: (req, res) => res.statusCode < 400
+  }));
+} else {
+  app.use(morgan("dev"));
+}
+
+// ✅ Serve Static Files (uploads folder) - CORS enabled with caching
 app.use("/uploads", (req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, OPTIONS");
+  // Cache static files for 1 day in production
+  if (process.env.NODE_ENV === "production") {
+    res.header("Cache-Control", "public, max-age=86400");
+  }
   next();
-}, express.static(path.join(__dirname, "../uploads")));
+}, express.static(path.join(__dirname, "../uploads"), {
+  maxAge: process.env.NODE_ENV === "production" ? "1d" : 0,
+  etag: true
+}));
 
 // Routes
 app.use("/api/users", require("./routes/user.routes"));
