@@ -55,6 +55,27 @@ const qrCodeSchema = new mongoose.Schema(
       email: String,
       phone: String,
     },
+    // URL for gateway-generated QR image (PayU DBQR, Razorpay QR, etc.)
+    gatewayQrImageUrl: {
+      type: String,
+      default: null,
+    },
+    // Direct payment URL from gateway (Razorpay payment link, etc.)
+    // When scanned, opens gateway checkout directly
+    gatewayPaymentUrl: {
+      type: String,
+      default: null,
+    },
+    // Gateway payment link ID for tracking
+    gatewayPaymentLinkId: {
+      type: String,
+      default: null,
+    },
+    // Which payment gateway was used to create this QR
+    gateway: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );

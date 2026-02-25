@@ -1,36 +1,51 @@
 const express = require("express");
 const router = express.Router();
 const GatewaySettings = require("../models/gatewaySettings.model");
+const {
+  SUPPORTED_GATEWAYS,
+  SUPPORTED_GATEWAY_IDS,
+  getGatewayMeta,
+} = require("../config/supportedGateways");
 
-// Seed default gateways if none exist
+const isGatewayReadyForPayments = (gatewayDoc) => {
+  if (!gatewayDoc || !gatewayDoc.isEnabled) return false;
+  if (!gatewayDoc.keyId || !gatewayDoc.keySecret) return false;
+  return true;
+};
+
+// Seed and sync default gateways
 const seedDefaults = async () => {
-  const count = await GatewaySettings.countDocuments();
-  if (count === 0) {
-    await GatewaySettings.insertMany([
+  for (const gateway of SUPPORTED_GATEWAYS) {
+    await GatewaySettings.updateOne(
+      { gateway: gateway.id },
       {
-        gateway: "razorpay",
-        label: "Razorpay",
-        description: "Credit/Debit Cards, UPI, Net Banking",
-        keyId: "",
-        keySecret: "",
-        isEnabled: false,
-        isTestMode: true,
-        isActive: false,
+        $setOnInsert: {
+          gateway: gateway.id,
+          keyId: "",
+          keySecret: "",
+          isEnabled: false,
+          isTestMode: true,
+          isActive: false,
+          checkoutUrl: "",
+        },
+        $set: {
+          label: gateway.label,
+          description: gateway.description,
+          docsUrl: gateway.docsUrl,
+          setupNote: gateway.setupNote,
+          keyIdLabel: gateway.keyIdLabel,
+          keySecretLabel: gateway.keySecretLabel,
+          checkoutMode: gateway.checkoutMode,
+          isIntegrated: Boolean(gateway.isIntegrated),
+        },
       },
-      {
-        gateway: "payu",
-        label: "PayU",
-        description: "UPI, Net Banking, Wallets",
-        keyId: "",
-        keySecret: "",
-        isEnabled: false,
-        isTestMode: true,
-        isActive: false,
-      },
-    ]);
+      { upsert: true }
+    );
   }
 };
-seedDefaults();
+seedDefaults().catch((error) => {
+  console.error("Gateway seed sync failed:", error.message);
+});
 
 // ============================
 // GET ALL GATEWAY SETTINGS
@@ -38,12 +53,26 @@ seedDefaults();
 router.get("/", async (req, res) => {
   try {
     const gateways = await GatewaySettings.find().sort({ gateway: 1 });
+
+    // Self-heal invalid active gateway records
+    const invalidActive = gateways.find(
+      (gatewayDoc) => gatewayDoc.isActive && !isGatewayReadyForPayments(gatewayDoc)
+    );
+    if (invalidActive) {
+      invalidActive.isActive = false;
+      await invalidActive.save();
+    }
+
+    const refreshedGateways = invalidActive
+      ? await GatewaySettings.find().sort({ gateway: 1 })
+      : gateways;
+
     // Mask secrets for frontend
-    const masked = gateways.map((g) => ({
+    const masked = refreshedGateways.map((g) => ({
       ...g.toObject(),
       keySecret: g.keySecret ? "••••••••••••••••••••••••" : "",
     }));
-    const activeGateway = gateways.find((g) => g.isActive);
+    const activeGateway = refreshedGateways.find((g) => g.isActive);
     res.json({
       success: true,
       gateways: masked,
@@ -68,9 +97,9 @@ router.get("/", async (req, res) => {
 router.put("/:gateway", async (req, res) => {
   try {
     const { gateway } = req.params;
-    const { keyId, keySecret, isEnabled, isTestMode } = req.body;
+    const { keyId, keySecret, isEnabled, isTestMode, checkoutUrl } = req.body;
 
-    if (!["razorpay", "payu"].includes(gateway)) {
+    if (!SUPPORTED_GATEWAY_IDS.includes(gateway)) {
       return res.status(400).json({ message: "Invalid gateway" });
     }
 
@@ -86,6 +115,19 @@ router.put("/:gateway", async (req, res) => {
     }
     if (isEnabled !== undefined) settings.isEnabled = isEnabled;
     if (isTestMode !== undefined) settings.isTestMode = isTestMode;
+    if (checkoutUrl !== undefined) settings.checkoutUrl = String(checkoutUrl || "").trim();
+
+    const meta = getGatewayMeta(gateway);
+    if (meta) {
+      settings.label = meta.label;
+      settings.description = meta.description;
+      settings.docsUrl = meta.docsUrl;
+      settings.setupNote = meta.setupNote;
+      settings.keyIdLabel = meta.keyIdLabel;
+      settings.keySecretLabel = meta.keySecretLabel;
+      settings.checkoutMode = meta.checkoutMode;
+      settings.isIntegrated = Boolean(meta.isIntegrated);
+    }
 
     await settings.save();
 
@@ -126,7 +168,7 @@ router.post("/set-active/:gateway", async (req, res) => {
   try {
     const { gateway } = req.params;
 
-    if (!["razorpay", "payu"].includes(gateway)) {
+    if (!SUPPORTED_GATEWAY_IDS.includes(gateway)) {
       return res.status(400).json({ message: "Invalid gateway" });
     }
 
@@ -178,12 +220,21 @@ router.get("/active", async (req, res) => {
       return res.status(404).json({ message: "No active gateway configured" });
     }
 
+    if (!isGatewayReadyForPayments(active)) {
+      active.isActive = false;
+      await active.save();
+      return res.status(404).json({
+        message: `${active.label} is marked active but not fully configured. Configure required settings and set it active again.`,
+      });
+    }
+
     res.json({
       success: true,
       gateway: active.gateway,
       label: active.label,
       keyId: active.keyId,
       isTestMode: active.isTestMode,
+      isIntegrated: active.isIntegrated,
     });
   } catch (error) {
     console.error("Get Active Gateway Error:", error);

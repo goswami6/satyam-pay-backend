@@ -1,8 +1,11 @@
 const express = require("express");
 const router = express.Router();
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 const upload = require("../middlewares/upload.middleware");
 const authController = require("../controllers/usercontroller");
 const User = require("../models/user.model"); // ✅ IMPORTANT IMPORT
+const transporter = require("../config/mailer");
 
 // Register Route
 router.post("/register", authController.register);
@@ -12,6 +15,168 @@ router.post("/login", authController.login);
 
 // Admin Login Route
 router.post("/admin-login", authController.adminLogin);
+
+// ===============================
+// FORGOT PASSWORD & RESET PASSWORD
+// ===============================
+
+// Forgot Password - Send Reset Email
+router.post("/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    if (!user) {
+      // Don't reveal if email exists or not for security
+      return res.status(200).json({ 
+        success: true,
+        message: "If this email exists, a reset link has been sent" 
+      });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
+
+    // Save token to user
+    user.resetPasswordToken = hashedToken;
+    user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
+    await user.save();
+
+    // Create reset URL
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
+
+    // Send email
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: user.email,
+      subject: "Password Reset Request - Rabbit Pay",
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #2563eb; margin: 0;">Rabbit Pay</h1>
+          </div>
+          
+          <div style="background: #f8fafc; border-radius: 10px; padding: 30px; margin-bottom: 20px;">
+            <h2 style="color: #1e293b; margin-top: 0;">Password Reset Request</h2>
+            <p style="color: #64748b; line-height: 1.6;">
+              Hello <strong>${user.fullName}</strong>,
+            </p>
+            <p style="color: #64748b; line-height: 1.6;">
+              We received a request to reset your password. Click the button below to create a new password:
+            </p>
+            
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${resetUrl}" 
+                 style="background: #2563eb; color: white; padding: 14px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                Reset Password
+              </a>
+            </div>
+            
+            <p style="color: #64748b; line-height: 1.6; font-size: 14px;">
+              This link will expire in <strong>1 hour</strong>.
+            </p>
+            
+            <p style="color: #64748b; line-height: 1.6; font-size: 14px;">
+              If you didn't request this password reset, please ignore this email or contact support if you have concerns.
+            </p>
+          </div>
+          
+          <div style="text-align: center; color: #94a3b8; font-size: 12px;">
+            <p>© ${new Date().getFullYear()} Rabbit Pay. All rights reserved.</p>
+          </div>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    res.status(200).json({ 
+      success: true,
+      message: "Password reset link sent to your email" 
+    });
+
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    res.status(500).json({ message: "Error sending reset email" });
+  }
+});
+
+// Reset Password - Verify Token & Update Password
+router.post("/reset-password/:token", async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.body;
+
+    if (!password) {
+      return res.status(400).json({ message: "Password is required" });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
+    // Hash the token from URL to compare with stored hash
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    // Find user with valid token
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ message: "Invalid or expired reset token" });
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(password, salt);
+
+    // Clear reset token fields
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+
+    await user.save();
+
+    res.status(200).json({ 
+      success: true,
+      message: "Password reset successful" 
+    });
+
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(500).json({ message: "Error resetting password" });
+  }
+});
+
+// Verify Reset Token (check if token is valid)
+router.get("/verify-reset-token/:token", async (req, res) => {
+  try {
+    const { token } = req.params;
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ valid: false, message: "Invalid or expired token" });
+    }
+
+    res.status(200).json({ valid: true });
+
+  } catch (error) {
+    res.status(500).json({ valid: false, message: "Error verifying token" });
+  }
+});
 
 // ✅ GET ALL USERS (MUST BE BEFORE /:id route)
 router.get("/all", async (req, res) => {

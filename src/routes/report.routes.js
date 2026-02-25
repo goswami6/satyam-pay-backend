@@ -297,4 +297,266 @@ router.delete("/:reportId", async (req, res) => {
   }
 });
 
+// ============================
+// ADMIN: GET ALL REPORTS
+// ============================
+router.get("/admin/all", async (req, res) => {
+  try {
+    const reports = await Report.find()
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .populate("userId", "name email");
+
+    res.json({
+      success: true,
+      reports,
+    });
+  } catch (error) {
+    console.error("Admin Get All Reports Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================
+// ADMIN: GET PLATFORM STATS
+// ============================
+router.get("/admin/stats", async (req, res) => {
+  try {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const startOfPrevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const endOfPrevMonth = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+
+    // Current month transactions (all users)
+    const currentMonthStats = await Transaction.aggregate([
+      {
+        $match: {
+          status: "Completed",
+          createdAt: { $gte: startOfMonth, $lte: endOfMonth },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalTransactions: { $sum: 1 },
+          totalCredit: {
+            $sum: { $cond: [{ $eq: ["$type", "Credit"] }, "$amount", 0] },
+          },
+          totalDebit: {
+            $sum: { $cond: [{ $eq: ["$type", "Debit"] }, "$amount", 0] },
+          },
+        },
+      },
+    ]);
+
+    // Previous month for comparison
+    const prevMonthStats = await Transaction.aggregate([
+      {
+        $match: {
+          status: "Completed",
+          createdAt: { $gte: startOfPrevMonth, $lte: endOfPrevMonth },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalCredit: {
+            $sum: { $cond: [{ $eq: ["$type", "Credit"] }, "$amount", 0] },
+          },
+        },
+      },
+    ]);
+
+    // All time stats
+    const allTimeStats = await Transaction.aggregate([
+      {
+        $match: { status: "Completed" },
+      },
+      {
+        $group: {
+          _id: null,
+          totalTransactions: { $sum: 1 },
+          totalCredit: {
+            $sum: { $cond: [{ $eq: ["$type", "Credit"] }, "$amount", 0] },
+          },
+          totalDebit: {
+            $sum: { $cond: [{ $eq: ["$type", "Debit"] }, "$amount", 0] },
+          },
+        },
+      },
+    ]);
+
+    // Total reports generated
+    const reportsCount = await Report.countDocuments();
+
+    // Active users count
+    const User = require("../models/user.model");
+    const activeUsers = await User.countDocuments({ isActive: true });
+
+    // Settlement stats
+    const settlementStats = await Withdrawal.aggregate([
+      { $match: { status: "Approved" } },
+      { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+    ]);
+
+    const current = currentMonthStats[0] || { totalTransactions: 0, totalCredit: 0, totalDebit: 0 };
+    const prev = prevMonthStats[0] || { totalCredit: 0 };
+    const allTime = allTimeStats[0] || { totalTransactions: 0, totalCredit: 0, totalDebit: 0 };
+    const settlements = settlementStats[0] || { total: 0, count: 0 };
+
+    const growthPercent = prev.totalCredit > 0
+      ? (((current.totalCredit - prev.totalCredit) / prev.totalCredit) * 100).toFixed(1)
+      : current.totalCredit > 0 ? 100 : 0;
+
+    res.json({
+      success: true,
+      stats: {
+        currentMonth: {
+          transactions: current.totalTransactions,
+          revenue: current.totalCredit,
+          expenses: current.totalDebit,
+          net: current.totalCredit - current.totalDebit,
+        },
+        allTime: {
+          transactions: allTime.totalTransactions,
+          revenue: allTime.totalCredit,
+          expenses: allTime.totalDebit,
+          net: allTime.totalCredit - allTime.totalDebit,
+        },
+        settlements: {
+          total: settlements.total,
+          count: settlements.count,
+        },
+        reportsGenerated: reportsCount,
+        activeUsers,
+        growthPercent: Number(growthPercent),
+      },
+    });
+  } catch (error) {
+    console.error("Admin Report Stats Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================
+// ADMIN: GENERATE PLATFORM REPORT
+// ============================
+router.post("/admin/generate", async (req, res) => {
+  try {
+    const { type, dateFrom, dateTo } = req.body;
+
+    if (!type) {
+      return res.status(400).json({ message: "Report type is required" });
+    }
+
+    // Set date range
+    const from = dateFrom ? new Date(dateFrom) : new Date(new Date().setMonth(new Date().getMonth() - 1));
+    const to = dateTo ? new Date(dateTo) : new Date();
+    to.setHours(23, 59, 59, 999);
+
+    // Generate report ID
+    const reportId = "ADMIN_RPT" + Date.now() + Math.random().toString(36).substring(2, 6).toUpperCase();
+
+    const typeNames = {
+      transaction: "Platform Transaction Report",
+      revenue: "Platform Revenue Report",
+      settlement: "Platform Settlement Report",
+      user: "User Activity Report",
+    };
+
+    const monthYear = to.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+    const title = `${typeNames[type] || "Platform Report"} - ${monthYear}`;
+
+    let csvContent = "";
+    let summary = { totalTransactions: 0, totalCredit: 0, totalDebit: 0, netAmount: 0 };
+
+    if (type === "transaction" || type === "revenue") {
+      let matchQuery = {
+        createdAt: { $gte: from, $lte: to },
+      };
+      if (type === "revenue") {
+        matchQuery.type = "Credit";
+        matchQuery.status = "Completed";
+      }
+
+      const transactions = await Transaction.find(matchQuery)
+        .sort({ createdAt: -1 })
+        .populate("userId", "name email");
+
+      csvContent = "Transaction ID,Date,User,Email,Description,Type,Amount,Status\n";
+      transactions.forEach((t) => {
+        const date = new Date(t.createdAt).toLocaleDateString("en-IN");
+        const userName = t.userId?.name || "N/A";
+        const userEmail = t.userId?.email || "N/A";
+        csvContent += `${t.transactionId},${date},"${userName}","${userEmail}","${t.description || ""}",${t.type},${t.amount},${t.status}\n`;
+        if (t.type === "Credit") summary.totalCredit += t.amount;
+        else summary.totalDebit += t.amount;
+      });
+      summary.totalTransactions = transactions.length;
+      summary.netAmount = summary.totalCredit - summary.totalDebit;
+
+    } else if (type === "settlement") {
+      const withdrawals = await Withdrawal.find({
+        createdAt: { $gte: from, $lte: to },
+      })
+        .sort({ createdAt: -1 })
+        .populate("userId", "name email");
+
+      csvContent = "Withdrawal ID,Date,User,Email,Amount,Status,Bank,Account\n";
+      withdrawals.forEach((w) => {
+        const date = new Date(w.createdAt).toLocaleDateString("en-IN");
+        const userName = w.userId?.name || "N/A";
+        const userEmail = w.userId?.email || "N/A";
+        csvContent += `${w._id},${date},"${userName}","${userEmail}",${w.amount},${w.status},"${w.bankName || ""}","${w.accountNumber || ""}"\n`;
+        summary.totalDebit += w.amount;
+      });
+      summary.totalTransactions = withdrawals.length;
+      summary.netAmount = -summary.totalDebit;
+
+    } else if (type === "user") {
+      const User = require("../models/user.model");
+      const users = await User.find({
+        createdAt: { $gte: from, $lte: to },
+      }).sort({ createdAt: -1 });
+
+      csvContent = "User ID,Name,Email,Phone,KYC Status,Balance,Created At\n";
+      users.forEach((u) => {
+        const date = new Date(u.createdAt).toLocaleDateString("en-IN");
+        csvContent += `${u._id},"${u.name || ""}","${u.email}","${u.phone || ""}",${u.kycStatus || "pending"},${u.balance || 0},${date}\n`;
+        summary.totalCredit += u.balance || 0;
+      });
+      summary.totalTransactions = users.length;
+    }
+
+    const fileData = Buffer.from(csvContent).toString("base64");
+
+    const report = await Report.create({
+      reportId,
+      userId: null, // Admin report, no specific user
+      type,
+      title,
+      dateRange: { from, to },
+      summary,
+      status: "ready",
+      fileData,
+    });
+
+    res.json({
+      success: true,
+      message: "Admin report generated successfully",
+      report: {
+        reportId: report.reportId,
+        title: report.title,
+        type: report.type,
+        summary: report.summary,
+        createdAt: report.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error("Admin Generate Report Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 module.exports = router;

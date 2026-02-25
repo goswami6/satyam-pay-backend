@@ -58,10 +58,14 @@ app.use("/api/transactions", transactionRoutes);
 app.use("/api/bulk", adminBulkRoutes);
 app.use("/api/bank", require("./routes/bank.routes"));
 app.use("/api/qr", require("./routes/qr.routes"));
+app.use("/api/api-tokens", require("./routes/apiToken.routes"));
 app.use("/api/reports", require("./routes/report.routes"));
 app.use("/api/support", require("./routes/support.routes"));
 app.use("/api/dashboard", require("./routes/dashboard.routes"));
 app.use("/api/gateway", require("./routes/gateway.routes"));
+app.use("/api/payout-requests", require("./routes/payoutRequest.routes"));
+app.use("/api/settings", require("./routes/settings.routes"));
+app.use("/api/enquiry", require("./routes/enquiry.routes"));
 
 // ✅ Public API Routes (v1) - For merchant integrations
 app.use("/api/v1", require("./routes/api.v1.routes"));

@@ -10,11 +10,12 @@ const reportSchema = new mongoose.Schema(
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false, // Not required for admin reports
+      default: null,
     },
     type: {
       type: String,
-      enum: ["transaction", "revenue", "settlement", "custom"],
+      enum: ["transaction", "revenue", "settlement", "custom", "user"],
       required: true,
     },
     title: {

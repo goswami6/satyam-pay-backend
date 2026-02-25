@@ -120,6 +120,14 @@ const userSchema = new mongoose.Schema(
       createdAt: { type: Date, default: Date.now }
     }],
 
+    // Password Reset
+    resetPasswordToken: {
+      type: String,
+    },
+    resetPasswordExpires: {
+      type: Date,
+    },
+
   },
   { timestamps: true }
 );

@@ -1,7 +1,13 @@
 const express = require("express");
 const router = express.Router();
 const razorpay = require("../config/razorpay");
-const { getRazorpayInstance, getActiveGatewaySettings, createGatewayOrder, verifyPayUHash } = require("../config/gatewayHelper");
+const {
+  getRazorpayInstance,
+  getActiveGatewaySettings,
+  createGatewayOrder,
+  verifyPayUHash,
+  fetchCashfreeOrder,
+} = require("../config/gatewayHelper");
 const upload = require("../middlewares/upload.middleware");
 const crypto = require("crypto");
 
@@ -10,7 +16,21 @@ const Transaction = require("../models/transaction.model");
 const Withdrawal = require("../models/withdrawal.model");
 const PaymentLink = require("../models/paymentLink.model");
 const Order = require("../models/order.model");
+const GatewaySettings = require("../models/gatewaySettings.model");
+const QRCode = require("../models/qrCode.model");
 const paymentController = require("../controllers/paymentController");
+
+const resolveGatewaySettingsForVerification = async (gatewayHint) => {
+  if (gatewayHint) {
+    const hinted = await GatewaySettings.findOne({ gateway: gatewayHint, isEnabled: true });
+    if (hinted?.keySecret) {
+      return hinted;
+    }
+  }
+
+  const { settings } = await getRazorpayInstance();
+  return settings;
+};
 
 
 // ============================
@@ -30,6 +50,8 @@ router.post("/create-order", async (req, res) => {
       productinfo: "Wallet Deposit",
       firstname: "User",
       email: "user@satyampay.com",
+      flowType: "deposit",
+      customerId: userId || "",
       udf1: userId || "",
       surl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/success`,
       furl: `${process.env.BACKEND_URL || "http://localhost:5000"}/api/payment/payu/failure`,
@@ -42,7 +64,13 @@ router.post("/create-order", async (req, res) => {
 
   } catch (error) {
     console.error("Create Order Error:", error);
-    res.status(500).json({ error: error.message });
+    const knownBusinessError =
+      error?.message?.includes("not integrated yet") ||
+      error?.message?.includes("No active payment gateway configured") ||
+      error?.message?.includes("credentials are not configured") ||
+      error?.message?.includes("not fully configured");
+
+    res.status(knownBusinessError ? 400 : 500).json({ message: error.message });
   }
 });
 
@@ -58,6 +86,7 @@ router.post("/verify", async (req, res) => {
       razorpay_signature,
       userId,
       amount,
+      gateway,
     } = req.body;
 
     // Validate input
@@ -66,7 +95,7 @@ router.post("/verify", async (req, res) => {
     }
 
     // Generate signature using active gateway secret
-    const { settings: gwSettings } = await getRazorpayInstance();
+    const gwSettings = await resolveGatewaySettingsForVerification(gateway);
     const sign = razorpay_order_id + "|" + razorpay_payment_id;
 
     const expectedSign = crypto
@@ -118,12 +147,24 @@ router.post("/payu/success", async (req, res) => {
   try {
     const { mihpayid, status, txnid, amount, productinfo, firstname, email, hash, key, udf1, udf2, udf3, udf4, udf5 } = req.body;
 
-    const { settings } = await getRazorpayInstance();
+    let payuSettings = await GatewaySettings.findOne({
+      gateway: "payu",
+      keyId: key,
+      isEnabled: true,
+    });
+
+    if (!payuSettings) {
+      payuSettings = await GatewaySettings.findOne({ gateway: "payu", isEnabled: true });
+    }
+
+    if (!payuSettings?.keySecret) {
+      throw new Error("PayU credentials are not configured for callback verification");
+    }
 
     // Verify hash
     const expectedHash = verifyPayUHash(
-      { status, txnid, amount, productinfo, firstname, email, key: settings.keyId, udf1, udf2, udf3, udf4, udf5 },
-      settings.keySecret
+      { status, txnid, amount, productinfo, firstname, email, key: payuSettings.keyId, udf1, udf2, udf3, udf4, udf5 },
+      payuSettings.keySecret
     );
 
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
@@ -250,6 +291,184 @@ router.post("/payu/failure", async (req, res) => {
   }
 
   return res.redirect(`${frontendUrl}/user/deposit-money?status=failed`);
+});
+
+// ============================
+// CASHFREE VERIFY RETURN
+// ============================
+router.post("/cashfree/verify-return", async (req, res) => {
+  try {
+    const { flow, orderId, linkId, qrId } = req.body;
+
+    if (!flow || !orderId) {
+      return res.status(400).json({ success: false, message: "flow and orderId are required" });
+    }
+
+    const cashfreeSettings = await GatewaySettings.findOne({
+      gateway: "cashfree",
+      isEnabled: true,
+    });
+
+    if (!cashfreeSettings || !cashfreeSettings.keyId || !cashfreeSettings.keySecret) {
+      return res.status(400).json({ success: false, message: "Cashfree credentials are not configured" });
+    }
+
+    const orderDetails = await fetchCashfreeOrder(
+      {
+        keyId: cashfreeSettings.keyId,
+        keySecret: cashfreeSettings.keySecret,
+        isTestMode: cashfreeSettings.isTestMode,
+      },
+      orderId
+    );
+
+    if (orderDetails?.order_status !== "PAID") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment is not completed yet",
+        status: orderDetails?.order_status,
+      });
+    }
+
+    const amount = Number(orderDetails.order_amount || 0);
+
+    if (flow === "deposit") {
+      const userId = orderDetails?.customer_details?.customer_id;
+      if (!userId) {
+        return res.status(400).json({ success: false, message: "Unable to resolve user for deposit" });
+      }
+
+      const exists = await Transaction.findOne({ transactionId: orderId, userId });
+      if (!exists) {
+        await User.findByIdAndUpdate(userId, { $inc: { balance: amount } });
+        await Transaction.create({
+          userId,
+          transactionId: orderId,
+          description: "Wallet Deposit via Cashfree",
+          type: "Credit",
+          amount,
+          status: "Completed",
+        });
+      }
+
+      return res.json({ success: true, message: "Deposit payment verified" });
+    }
+
+    if (flow === "checkout") {
+      const paymentLink = await PaymentLink.findOne({
+        $or: [{ linkId }, { razorpayOrderId: orderId }],
+      });
+
+      if (paymentLink) {
+        if (paymentLink.status !== "paid") {
+          paymentLink.status = "paid";
+          paymentLink.razorpayPaymentId = orderId;
+          paymentLink.paidAt = new Date();
+          await paymentLink.save();
+
+          await User.findByIdAndUpdate(paymentLink.userId, {
+            $inc: { balance: Number(paymentLink.amount) },
+          });
+
+          const exists = await Transaction.findOne({
+            userId: paymentLink.userId,
+            transactionId: orderId,
+          });
+          if (!exists) {
+            await Transaction.create({
+              userId: paymentLink.userId,
+              transactionId: orderId,
+              description: `Payment from ${paymentLink.customerName} via Cashfree`,
+              type: "Credit",
+              amount: Number(paymentLink.amount),
+              status: "Completed",
+            });
+          }
+        }
+
+        return res.json({ success: true, message: "Checkout payment verified" });
+      }
+
+      const apiOrder = await Order.findOne({ orderId: linkId });
+      if (!apiOrder) {
+        return res.status(404).json({ success: false, message: "Payment order not found" });
+      }
+
+      if (apiOrder.status !== "paid") {
+        const creditedAmount = Number(apiOrder.amount) / 100;
+        apiOrder.status = "paid";
+        apiOrder.paymentId = orderId;
+        apiOrder.paymentStatus = "captured";
+        apiOrder.amountPaid = Number(apiOrder.amount);
+        apiOrder.paidAt = new Date();
+        await apiOrder.save();
+
+        await User.findByIdAndUpdate(apiOrder.merchantId, {
+          $inc: { balance: creditedAmount },
+        });
+
+        const exists = await Transaction.findOne({
+          userId: apiOrder.merchantId,
+          transactionId: orderId,
+        });
+        if (!exists) {
+          await Transaction.create({
+            userId: apiOrder.merchantId,
+            transactionId: orderId,
+            description: `API order payment ${apiOrder.orderId} via Cashfree`,
+            type: "Credit",
+            amount: creditedAmount,
+            status: "Completed",
+          });
+        }
+      }
+
+      return res.json({ success: true, message: "Checkout payment verified" });
+    }
+
+    if (flow === "qr") {
+      const qrCode = await QRCode.findOne({
+        $or: [{ qrId }, { razorpayOrderId: orderId }],
+      });
+
+      if (!qrCode) {
+        return res.status(404).json({ success: false, message: "QR order not found" });
+      }
+
+      if (qrCode.status !== "paid") {
+        qrCode.status = "paid";
+        qrCode.razorpayPaymentId = orderId;
+        qrCode.paidAt = new Date();
+        await qrCode.save();
+
+        await User.findByIdAndUpdate(qrCode.userId, {
+          $inc: { balance: Number(qrCode.amount) },
+        });
+
+        const exists = await Transaction.findOne({
+          userId: qrCode.userId,
+          transactionId: orderId,
+        });
+        if (!exists) {
+          await Transaction.create({
+            userId: qrCode.userId,
+            transactionId: orderId,
+            description: "QR Payment via Cashfree",
+            type: "Credit",
+            amount: Number(qrCode.amount),
+            status: "Completed",
+          });
+        }
+      }
+
+      return res.json({ success: true, message: "QR payment verified" });
+    }
+
+    return res.status(400).json({ success: false, message: "Unsupported flow" });
+  } catch (error) {
+    console.error("Cashfree Verify Return Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 
@@ -722,6 +941,8 @@ router.post("/checkout/create-order", async (req, res) => {
         productinfo: paymentLink.description || "Payment",
         firstname: paymentLink.customerName || "Customer",
         email: paymentLink.customerEmail || "customer@example.com",
+        flowType: "checkout",
+        linkId,
         udf1: paymentLink.userId?.toString() || "",
         udf2: linkId,
         udf3: "checkout",
@@ -732,6 +953,9 @@ router.post("/checkout/create-order", async (req, res) => {
 
       if (result.gateway === "razorpay" && result.order) {
         paymentLink.razorpayOrderId = result.order.id;
+        await paymentLink.save();
+      } else if (result.gateway === "cashfree" && result.cashfreeData?.orderId) {
+        paymentLink.razorpayOrderId = result.cashfreeData.orderId;
         await paymentLink.save();
       }
     } else {
@@ -749,6 +973,8 @@ router.post("/checkout/create-order", async (req, res) => {
         productinfo: apiOrder.notes?.description || "Order Payment",
         firstname: apiOrder.customerName || "Customer",
         email: apiOrder.customerEmail || "customer@example.com",
+        flowType: "checkout",
+        linkId,
         udf1: apiOrder.merchantId?.toString() || "",
         udf2: linkId,
         udf3: "checkout",
@@ -760,6 +986,8 @@ router.post("/checkout/create-order", async (req, res) => {
       const nextNotes = { ...(apiOrder.notes || {}) };
       if (result.gateway === "razorpay" && result.order) {
         nextNotes.razorpayOrderId = result.order.id;
+      } else if (result.gateway === "cashfree" && result.cashfreeData?.orderId) {
+        nextNotes.cashfreeOrderId = result.cashfreeData.orderId;
       }
 
       apiOrder.notes = nextNotes;
@@ -789,6 +1017,7 @@ router.post("/checkout/verify", async (req, res) => {
       razorpay_payment_id,
       razorpay_signature,
       linkId,
+      gateway,
     } = req.body;
 
     // Validate input
@@ -804,7 +1033,7 @@ router.post("/checkout/verify", async (req, res) => {
 
     // Generate signature using active gateway secret
     const sign = razorpay_order_id + "|" + razorpay_payment_id;
-    const { settings: checkoutGwSettings } = await getRazorpayInstance();
+    const checkoutGwSettings = await resolveGatewaySettingsForVerification(gateway);
     const expectedSign = crypto
       .createHmac("sha256", checkoutGwSettings.keySecret)
       .update(sign)

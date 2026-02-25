@@ -1,10 +1,11 @@
 const mongoose = require("mongoose");
+const { SUPPORTED_GATEWAY_IDS } = require("../config/supportedGateways");
 
 const gatewaySettingsSchema = new mongoose.Schema(
   {
     gateway: {
       type: String,
-      enum: ["razorpay", "payu"],
+      enum: SUPPORTED_GATEWAY_IDS,
       required: true,
       unique: true,
     },
@@ -21,6 +22,35 @@ const gatewaySettingsSchema = new mongoose.Schema(
       default: "",
     },
     keySecret: {
+      type: String,
+      default: "",
+    },
+    keyIdLabel: {
+      type: String,
+      default: "Key ID",
+    },
+    keySecretLabel: {
+      type: String,
+      default: "Key Secret",
+    },
+    docsUrl: {
+      type: String,
+      default: "",
+    },
+    setupNote: {
+      type: String,
+      default: "",
+    },
+    checkoutMode: {
+      type: String,
+      enum: ["native", "redirect"],
+      default: "redirect",
+    },
+    isIntegrated: {
+      type: Boolean,
+      default: false,
+    },
+    checkoutUrl: {
       type: String,
       default: "",
     },

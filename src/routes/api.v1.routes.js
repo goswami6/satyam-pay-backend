@@ -3,6 +3,8 @@ const router = express.Router();
 const crypto = require("crypto");
 const apiAuthMiddleware = require("../middlewares/apiAuth.middleware");
 const Order = require("../models/order.model");
+const PayoutRequest = require("../models/payoutRequest.model");
+const User = require("../models/user.model");
 
 /**
  * Public API Routes (v1)
@@ -435,6 +437,392 @@ router.get("/test", (req, res) => {
     },
     timestamp: new Date().toISOString()
   });
+});
+
+// ============================================
+// PAYOUT API ROUTES
+// ============================================
+
+// Helper function to generate unique payout ID
+const generatePayoutId = () => {
+  return "pout_" + crypto.randomBytes(10).toString("hex");
+};
+
+/**
+ * ✅ CREATE PAYOUT
+ * POST /api/v1/payouts
+ * 
+ * Creates a new payout request (requires admin approval)
+ * 
+ * Request Body for Bank Transfer:
+ * {
+ *   "amount": 50000,                    // Amount in paise (₹500.00)
+ *   "currency": "INR",
+ *   "method": "bank",
+ *   "bank_account": {
+ *     "account_number": "1234567890",
+ *     "ifsc_code": "HDFC0001234",
+ *     "account_holder_name": "John Doe",
+ *     "bank_name": "HDFC Bank"
+ *   },
+ *   "notes": { ... }
+ * }
+ * 
+ * Request Body for UPI:
+ * {
+ *   "amount": 50000,
+ *   "currency": "INR",
+ *   "method": "upi",
+ *   "upi": {
+ *     "upi_id": "john@upi"
+ *   },
+ *   "notes": { ... }
+ * }
+ */
+router.post("/payouts", async (req, res) => {
+  try {
+    const { amount, currency = "INR", method, bank_account, upi, notes } = req.body;
+
+    // Validate required fields
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        error: {
+          code: "BAD_REQUEST_ERROR",
+          description: "The amount field is required and must be greater than 0",
+          field: "amount"
+        }
+      });
+    }
+
+    // Minimum amount validation (₹1.00 = 100 paise)
+    if (amount < 100) {
+      return res.status(400).json({
+        error: {
+          code: "BAD_REQUEST_ERROR",
+          description: "The minimum amount is 100 paise (₹1.00)",
+          field: "amount"
+        }
+      });
+    }
+
+    // Validate method
+    if (!method || !["bank", "upi"].includes(method)) {
+      return res.status(400).json({
+        error: {
+          code: "BAD_REQUEST_ERROR",
+          description: "Invalid method. Must be 'bank' or 'upi'",
+          field: "method"
+        }
+      });
+    }
+
+    // Validate bank account details
+    if (method === "bank") {
+      if (!bank_account || !bank_account.account_number || !bank_account.ifsc_code || !bank_account.account_holder_name) {
+        return res.status(400).json({
+          error: {
+            code: "BAD_REQUEST_ERROR",
+            description: "Bank account details are required: account_number, ifsc_code, account_holder_name",
+            field: "bank_account"
+          }
+        });
+      }
+    }
+
+    // Validate UPI details
+    if (method === "upi") {
+      if (!upi || !upi.upi_id) {
+        return res.status(400).json({
+          error: {
+            code: "BAD_REQUEST_ERROR",
+            description: "UPI ID is required",
+            field: "upi"
+          }
+        });
+      }
+    }
+
+    // Get user and check balance
+    const user = await User.findById(req.apiUser.userId);
+    if (!user) {
+      return res.status(404).json({
+        error: {
+          code: "NOT_FOUND_ERROR",
+          description: "Merchant account not found"
+        }
+      });
+    }
+
+    // Convert amount from paise to rupees for balance check
+    const amountInRupees = amount / 100;
+    if (user.balance < amountInRupees) {
+      return res.status(400).json({
+        error: {
+          code: "INSUFFICIENT_BALANCE",
+          description: `Insufficient balance. Available: ₹${user.balance}, Required: ₹${amountInRupees}`
+        }
+      });
+    }
+
+    const payoutId = generatePayoutId();
+
+    // Create payout request
+    const payoutRequest = new PayoutRequest({
+      payoutId,
+      vendorId: req.apiUser.userId,
+      amount: amountInRupees,
+      method,
+      accountNumber: method === "bank" ? bank_account.account_number : null,
+      ifscCode: method === "bank" ? bank_account.ifsc_code : null,
+      accountHolderName: method === "bank" ? bank_account.account_holder_name : null,
+      bankName: method === "bank" ? (bank_account.bank_name || null) : null,
+      upiId: method === "upi" ? upi.upi_id : null,
+      status: "requested",
+      notes: notes || {},
+      source: "api",
+      apiKeyId: req.apiUser.keyId
+    });
+
+    await payoutRequest.save();
+
+    res.status(200).json({
+      id: payoutId,
+      entity: "payout",
+      amount,
+      currency,
+      method,
+      status: "requested",
+      bank_account: method === "bank" ? {
+        account_number: bank_account.account_number.slice(-4).padStart(bank_account.account_number.length, "*"),
+        ifsc_code: bank_account.ifsc_code,
+        account_holder_name: bank_account.account_holder_name,
+        bank_name: bank_account.bank_name || null
+      } : null,
+      upi: method === "upi" ? { upi_id: upi.upi_id } : null,
+      notes: notes || {},
+      created_at: Math.floor(Date.now() / 1000),
+      message: "Payout request submitted for admin approval"
+    });
+
+  } catch (error) {
+    console.error("Create Payout Error:", error);
+    res.status(500).json({
+      error: {
+        code: "SERVER_ERROR",
+        description: "Failed to create payout request"
+      }
+    });
+  }
+});
+
+/**
+ * ✅ GET PAYOUT BY ID
+ * GET /api/v1/payouts/:payoutId
+ * 
+ * Fetch details of a specific payout
+ */
+router.get("/payouts/:payoutId", async (req, res) => {
+  try {
+    const { payoutId } = req.params;
+
+    const payout = await PayoutRequest.findOne({
+      $or: [{ payoutId }, { _id: payoutId }],
+      vendorId: req.apiUser.userId
+    });
+
+    if (!payout) {
+      return res.status(404).json({
+        error: {
+          code: "NOT_FOUND_ERROR",
+          description: "Payout not found"
+        }
+      });
+    }
+
+    res.json({
+      id: payout.payoutId || payout._id,
+      entity: "payout",
+      amount: payout.amount * 100, // Convert to paise
+      currency: "INR",
+      method: payout.method,
+      status: payout.status,
+      bank_account: payout.method === "bank" ? {
+        account_number: payout.accountNumber ? payout.accountNumber.slice(-4).padStart(payout.accountNumber.length, "*") : null,
+        ifsc_code: payout.ifscCode,
+        account_holder_name: payout.accountHolderName,
+        bank_name: payout.bankName
+      } : null,
+      upi: payout.method === "upi" ? { upi_id: payout.upiId } : null,
+      notes: payout.notes || {},
+      failure_reason: payout.rejectionReason || null,
+      transaction_id: payout.transactionId || null,
+      created_at: Math.floor(new Date(payout.createdAt).getTime() / 1000),
+      approved_at: payout.approvedAt ? Math.floor(new Date(payout.approvedAt).getTime() / 1000) : null,
+      completed_at: payout.completedAt ? Math.floor(new Date(payout.completedAt).getTime() / 1000) : null
+    });
+
+  } catch (error) {
+    console.error("Get Payout Error:", error);
+    res.status(500).json({
+      error: {
+        code: "SERVER_ERROR",
+        description: "Failed to fetch payout details"
+      }
+    });
+  }
+});
+
+/**
+ * ✅ LIST ALL PAYOUTS
+ * GET /api/v1/payouts
+ * 
+ * Fetch all payouts for the merchant
+ * 
+ * Query Parameters:
+ * - status: Filter by status (requested, approved, rejected, processing, completed, failed)
+ * - count: Number of records (default: 10, max: 100)
+ * - skip: Number of records to skip (default: 0)
+ */
+router.get("/payouts", async (req, res) => {
+  try {
+    const { status, count = 10, skip = 0 } = req.query;
+
+    const query = { vendorId: req.apiUser.userId };
+    if (status) {
+      query.status = status;
+    }
+
+    const limit = Math.min(parseInt(count) || 10, 100);
+    const offset = parseInt(skip) || 0;
+
+    const payouts = await PayoutRequest.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip(offset);
+
+    const total = await PayoutRequest.countDocuments(query);
+
+    res.json({
+      entity: "collection",
+      count: payouts.length,
+      total,
+      items: payouts.map(payout => ({
+        id: payout.payoutId || payout._id,
+        entity: "payout",
+        amount: payout.amount * 100,
+        currency: "INR",
+        method: payout.method,
+        status: payout.status,
+        bank_account: payout.method === "bank" ? {
+          account_number: payout.accountNumber ? payout.accountNumber.slice(-4).padStart(payout.accountNumber.length, "*") : null,
+          ifsc_code: payout.ifscCode,
+          account_holder_name: payout.accountHolderName
+        } : null,
+        upi: payout.method === "upi" ? { upi_id: payout.upiId } : null,
+        created_at: Math.floor(new Date(payout.createdAt).getTime() / 1000)
+      }))
+    });
+
+  } catch (error) {
+    console.error("List Payouts Error:", error);
+    res.status(500).json({
+      error: {
+        code: "SERVER_ERROR",
+        description: "Failed to list payouts"
+      }
+    });
+  }
+});
+
+/**
+ * ✅ CANCEL PAYOUT
+ * POST /api/v1/payouts/:payoutId/cancel
+ * 
+ * Cancel a pending payout request (only if status is 'requested')
+ */
+router.post("/payouts/:payoutId/cancel", async (req, res) => {
+  try {
+    const { payoutId } = req.params;
+
+    const payout = await PayoutRequest.findOne({
+      $or: [{ payoutId }, { _id: payoutId }],
+      vendorId: req.apiUser.userId
+    });
+
+    if (!payout) {
+      return res.status(404).json({
+        error: {
+          code: "NOT_FOUND_ERROR",
+          description: "Payout not found"
+        }
+      });
+    }
+
+    if (payout.status !== "requested") {
+      return res.status(400).json({
+        error: {
+          code: "BAD_REQUEST_ERROR",
+          description: `Cannot cancel payout with status '${payout.status}'. Only 'requested' payouts can be cancelled.`
+        }
+      });
+    }
+
+    payout.status = "cancelled";
+    await payout.save();
+
+    res.json({
+      id: payout.payoutId || payout._id,
+      entity: "payout",
+      status: "cancelled",
+      message: "Payout cancelled successfully"
+    });
+
+  } catch (error) {
+    console.error("Cancel Payout Error:", error);
+    res.status(500).json({
+      error: {
+        code: "SERVER_ERROR",
+        description: "Failed to cancel payout"
+      }
+    });
+  }
+});
+
+/**
+ * ✅ GET ACCOUNT BALANCE
+ * GET /api/v1/balance
+ * 
+ * Get current account balance
+ */
+router.get("/balance", async (req, res) => {
+  try {
+    const user = await User.findById(req.apiUser.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        error: {
+          code: "NOT_FOUND_ERROR",
+          description: "Account not found"
+        }
+      });
+    }
+
+    res.json({
+      entity: "balance",
+      balance: user.balance * 100, // In paise
+      currency: "INR",
+      balance_formatted: `₹${user.balance.toFixed(2)}`
+    });
+
+  } catch (error) {
+    console.error("Get Balance Error:", error);
+    res.status(500).json({
+      error: {
+        code: "SERVER_ERROR",
+        description: "Failed to fetch balance"
+      }
+    });
+  }
 });
 
 module.exports = router;
