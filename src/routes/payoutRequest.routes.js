@@ -267,12 +267,36 @@ router.put("/admin/approve/:id", authMiddleware, async (req, res) => {
     request.approvedAt = new Date();
     await request.save();
 
+    // Create a transaction record for payout
+    const Transaction = require("../models/transaction.model");
+    const txn = new Transaction({
+      userId: vendor._id,
+      transactionId: `PO${Date.now()}`,
+      description: `Payout to ${request.method === 'bank' ? 'Bank Account' : 'UPI'} - ${request.accountHolderName || request.upiId || 'N/A'}`,
+      type: "Debit",
+      amount: request.amount,
+      status: "Completed",
+      customerName: request.accountHolderName || vendor.name,
+      method: request.method,
+      category: "payout",
+      referenceId: request._id.toString(),
+      notes: adminNote || `Payout approved`,
+      fee: fee,
+      netAmount: request.amount,
+      accountNumber: request.accountNumber,
+      ifscCode: request.ifscCode,
+      upiId: request.upiId,
+      bankName: request.bankName,
+    });
+    await txn.save();
+
     res.json({
       success: true,
       message: "Payout request approved. Amount deducted from vendor balance.",
       request,
       vendorNewBalance: vendor.balance,
       deducted: totalDeduction,
+      transaction: txn,
     });
   } catch (error) {
     console.error("Approve request error:", error);
