@@ -825,17 +825,19 @@ router.post("/generate-link", async (req, res) => {
     </html>
     `;
 
-    // Send email
-    await transporter.sendMail({
+    // Send email in background (don't block API response)
+    transporter.sendMail({
       from: `"SatyamPay" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: `💰 Payment Request from ${sender.fullName} - ₹${Number(amount).toLocaleString('en-IN')}`,
       html: emailHTML,
+    }).catch(emailErr => {
+      console.error("Email sending failed (non-blocking):", emailErr.message);
     });
 
     res.json({
       success: true,
-      message: "Payment link generated and email sent successfully",
+      message: "Payment link generated successfully",
       paymentLink: checkoutUrl,
       linkId: linkId,
     });

@@ -428,6 +428,16 @@ router.get("/kyc-pending/all", async (req, res) => {
   }
 });
 
+// ✅ Get all rejected KYC users (for admin)
+router.get("/kyc-rejected/all", async (req, res) => {
+  try {
+    const users = await User.find({ "kyc.status": "rejected" }).select("-password").sort({ updatedAt: -1 });
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // ============================
 // API TOKEN MANAGEMENT
 // ============================

@@ -48,8 +48,8 @@ exports.requestMoney = async (req, res) => {
       paymentLinkId: paymentLink.id,
     });
 
-    // 3️⃣ Send Email
-    await transporter.sendMail({
+    // 3️⃣ Send Email (non-blocking)
+    transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: email,
       subject: "Payment Request - SatyamPay",
@@ -66,6 +66,8 @@ exports.requestMoney = async (req, res) => {
         <br/><br/>
         <small>This is a secure payment powered by Razorpay.</small>
       `,
+    }).catch(emailErr => {
+      console.error("Email sending failed (non-blocking):", emailErr.message);
     });
 
     return res.json({
