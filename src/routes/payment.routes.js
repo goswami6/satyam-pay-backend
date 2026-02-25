@@ -203,14 +203,25 @@ router.post("/payu/success", async (req, res) => {
             $inc: { balance: Number(paymentLink.amount) },
           });
 
-          await Transaction.create({
-            userId: paymentLink.userId,
-            transactionId: mihpayid || txnid,
-            description: `Payment from ${paymentLink.customerName} via PayU`,
-            type: "Credit",
-            amount: Number(paymentLink.amount),
-            status: "Completed",
-          });
+          // Update existing pending transaction or create new one
+          const existingTxn = await Transaction.findOne({ referenceId: linkId, userId: paymentLink.userId });
+          if (existingTxn) {
+            existingTxn.status = "Completed";
+            existingTxn.transactionId = mihpayid || txnid;
+            existingTxn.description = `Payment from ${paymentLink.customerName} via PayU`;
+            await existingTxn.save();
+          } else {
+            await Transaction.create({
+              userId: paymentLink.userId,
+              transactionId: mihpayid || txnid,
+              description: `Payment from ${paymentLink.customerName} via PayU`,
+              type: "Credit",
+              amount: Number(paymentLink.amount),
+              status: "Completed",
+              category: "payment",
+              referenceId: linkId,
+            });
+          }
         } else {
           const apiOrder = await Order.findOne({ orderId: linkId });
           if (apiOrder) {
@@ -654,6 +665,21 @@ router.post("/generate-link", async (req, res) => {
       status: "pending",
     });
 
+    // Create a Pending transaction so it shows on the transaction page
+    await Transaction.create({
+      userId,
+      transactionId: linkId,
+      description: `Payment request to ${name}`,
+      type: "Credit",
+      amount: Number(amount),
+      status: "Pending",
+      category: "payment",
+      method: "other",
+      customerName: name,
+      referenceId: linkId,
+      notes: `Payment link sent to ${email}`,
+    });
+
     // Generate our checkout URL
     const checkoutUrl = `${process.env.FRONTEND_URL || "http://localhost:5173"}/pay/${linkId}`;
 
@@ -825,21 +851,28 @@ router.post("/generate-link", async (req, res) => {
     </html>
     `;
 
-    // Send email in background (don't block API response)
-    transporter.sendMail({
-      from: `"SatyamPay" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: `💰 Payment Request from ${sender.fullName} - ₹${Number(amount).toLocaleString('en-IN')}`,
-      html: emailHTML,
-    }).catch(emailErr => {
-      console.error("Email sending failed (non-blocking):", emailErr.message);
-    });
+    // Send email with timeout protection
+    let emailSent = false;
+    try {
+      await transporter.sendMail({
+        from: `"SatyamPay" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: `Payment Request from ${sender.fullName} - Rs.${Number(amount).toLocaleString('en-IN')}`,
+        html: emailHTML,
+      });
+      emailSent = true;
+    } catch (emailErr) {
+      console.error("Email sending failed:", emailErr.message);
+    }
 
     res.json({
       success: true,
-      message: "Payment link generated successfully",
+      message: emailSent
+        ? "Payment link generated and email sent successfully"
+        : "Payment link generated but email could not be sent",
       paymentLink: checkoutUrl,
       linkId: linkId,
+      emailSent,
     });
 
   } catch (error) {
@@ -896,11 +929,15 @@ router.get("/checkout/:linkId", async (req, res) => {
       return res.status(400).json({ message: "Payment link is no longer valid", status: paymentLink.status });
     }
 
-    // Check if expired by due date
-    if (paymentLink.dueDate && new Date(paymentLink.dueDate) < new Date()) {
-      paymentLink.status = "expired";
-      await paymentLink.save();
-      return res.status(400).json({ message: "Payment link has expired", status: "expired" });
+    // Check if expired by due date (expire at end of day 23:59:59)
+    if (paymentLink.dueDate) {
+      const dueEnd = new Date(paymentLink.dueDate);
+      dueEnd.setHours(23, 59, 59, 999);
+      if (dueEnd < new Date()) {
+        paymentLink.status = "expired";
+        await paymentLink.save();
+        return res.status(400).json({ message: "Payment link has expired", status: "expired" });
+      }
     }
 
     res.json({
@@ -1053,14 +1090,25 @@ router.post("/checkout/verify", async (req, res) => {
           $inc: { balance: Number(paymentLink.amount) },
         });
 
-        await Transaction.create({
-          userId: paymentLink.userId,
-          transactionId: razorpay_payment_id,
-          description: `Payment from ${paymentLink.customerName}`,
-          type: "Credit",
-          amount: Number(paymentLink.amount),
-          status: "Completed",
-        });
+        // Update existing pending transaction or create new one
+        const existingTxn = await Transaction.findOne({ referenceId: linkId, userId: paymentLink.userId });
+        if (existingTxn) {
+          existingTxn.status = "Completed";
+          existingTxn.transactionId = razorpay_payment_id;
+          existingTxn.description = `Payment from ${paymentLink.customerName}`;
+          await existingTxn.save();
+        } else {
+          await Transaction.create({
+            userId: paymentLink.userId,
+            transactionId: razorpay_payment_id,
+            description: `Payment from ${paymentLink.customerName}`,
+            type: "Credit",
+            amount: Number(paymentLink.amount),
+            status: "Completed",
+            category: "payment",
+            referenceId: linkId,
+          });
+        }
       } else {
         const creditedAmount = Number(apiOrder.amount) / 100;
 
