@@ -46,6 +46,14 @@ const transactionSchema = new mongoose.Schema(
     ifscCode: String,
     upiId: String,
     bankName: String,
+    // Receipt fields
+    receiptGenerated: {
+      type: Boolean,
+      default: false,
+    },
+    receiptNumber: String,
+    receiptSentAt: Date,
+    receiptSentTo: String,
   },
   { timestamps: true }
 );

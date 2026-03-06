@@ -50,24 +50,27 @@ router.get("/public", async (req, res) => {
   try {
     const settings = await Settings.getSettings();
     res.json({
-      websiteName: settings.websiteName,
-      websiteUrl: settings.websiteUrl,
-      websiteEmail: settings.websiteEmail,
-      websitePhone: settings.websitePhone,
-      websiteDescription: settings.websiteDescription,
-      metaKeywords: settings.metaKeywords,
-      logo: settings.logo,
-      favicon: settings.favicon,
-      address: settings.address,
-      city: settings.city,
-      state: settings.state,
-      country: settings.country,
-      zipCode: settings.zipCode,
-      socialLinks: settings.socialLinks,
+      success: true,
+      data: {
+        websiteName: settings.websiteName,
+        websiteUrl: settings.websiteUrl,
+        websiteEmail: settings.websiteEmail,
+        websitePhone: settings.websitePhone,
+        websiteDescription: settings.websiteDescription,
+        metaKeywords: settings.metaKeywords,
+        logo: settings.logo,
+        favicon: settings.favicon,
+        address: settings.address,
+        city: settings.city,
+        state: settings.state,
+        country: settings.country,
+        zipCode: settings.zipCode,
+        socialLinks: settings.socialLinks,
+      }
     });
   } catch (error) {
     console.error("Get public settings error:", error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -105,8 +108,8 @@ router.put("/", upload.fields([
 
     // Update social links
     if (req.body.socialLinks) {
-      const socialLinks = typeof req.body.socialLinks === "string" 
-        ? JSON.parse(req.body.socialLinks) 
+      const socialLinks = typeof req.body.socialLinks === "string"
+        ? JSON.parse(req.body.socialLinks)
         : req.body.socialLinks;
       settings.socialLinks = { ...settings.socialLinks, ...socialLinks };
     }

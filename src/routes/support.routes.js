@@ -2,6 +2,8 @@ const express = require("express");
 const router = express.Router();
 const SupportChat = require("../models/supportChat.model");
 const User = require("../models/user.model");
+const Settings = require("../models/settings.model");
+const Notification = require("../models/notification.model");
 const upload = require("../middlewares/upload.middleware");
 
 // ============================
@@ -10,6 +12,11 @@ const upload = require("../middlewares/upload.middleware");
 router.get("/chat/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
+
+    // Get settings for dynamic branding
+    const settings = await Settings.findOne() || {};
+    const websiteName = settings.websiteName || 'Satyam Pay';
+    const welcomeMessage = `Hello! Welcome to ${websiteName} Support. How can we help you today?`;
 
     // Find existing open chat or create new one
     let chat = await SupportChat.findOne({
@@ -28,11 +35,11 @@ router.get("/chat/:userId", async (req, res) => {
         messages: [
           {
             sender: "admin",
-            message: "Hello! Welcome to SatyamPay Support. How can we help you today?",
+            message: welcomeMessage,
             createdAt: new Date(),
           },
         ],
-        lastMessage: "Hello! Welcome to SatyamPay Support. How can we help you today?",
+        lastMessage: welcomeMessage,
         lastMessageAt: new Date(),
       });
     }
@@ -105,6 +112,23 @@ router.post("/chat/:userId/send", async (req, res) => {
     chat.status = "pending"; // Mark as pending for admin attention
 
     await chat.save();
+
+    // Create notification for admin
+    try {
+      const user = await User.findById(userId);
+      const userName = user?.name || user?.email || 'User';
+      await Notification.create({
+        userId: userId,  // Store which user sent this
+        forAdmin: true,  // This is for admin
+        title: "New Support Message",
+        message: `${userName}: ${message.trim().length > 80 ? message.trim().substring(0, 80) + "..." : message.trim()}`,
+        type: "user_message",
+        link: `/admin/support?chatId=${chat.chatId}`,
+        metadata: { chatId: chat.chatId }
+      });
+    } catch (notifError) {
+      console.error("Failed to create admin notification:", notifError);
+    }
 
     res.json({
       success: true,
@@ -303,6 +327,19 @@ router.post("/admin/chat/:chatId/send", async (req, res) => {
 
     await chat.save();
 
+    // Create notification for user
+    try {
+      await Notification.create({
+        userId: chat.userId,
+        title: "New Support Response",
+        message: message.trim().length > 100 ? message.trim().substring(0, 100) + "..." : message.trim(),
+        type: "support",
+        link: "/user/support"
+      });
+    } catch (notifError) {
+      console.error("Failed to create notification:", notifError);
+    }
+
     res.json({
       success: true,
       message: "Message sent successfully",
@@ -352,6 +389,20 @@ router.post("/admin/chat/:chatId/send-file", upload.single("file"), async (req, 
     chat.status = "open";
 
     await chat.save();
+
+    // Create notification for user
+    try {
+      const notifMessage = message || (file ? `Sent a file: ${file.originalname}` : "New message from support");
+      await Notification.create({
+        userId: chat.userId,
+        title: "New Support Response",
+        message: notifMessage.length > 100 ? notifMessage.substring(0, 100) + "..." : notifMessage,
+        type: "support",
+        link: "/user/support"
+      });
+    } catch (notifError) {
+      console.error("Failed to create notification:", notifError);
+    }
 
     res.json({
       success: true,

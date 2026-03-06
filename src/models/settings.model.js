@@ -5,15 +5,15 @@ const settingsSchema = new mongoose.Schema(
     // Website Information
     websiteName: {
       type: String,
-      default: "Rabbit Pay",
+      default: "Satyam Pay",
     },
     websiteUrl: {
       type: String,
-      default: "https://rabbitpay.in.net",
+      default: "https://satyampay.in",
     },
     websiteEmail: {
       type: String,
-      default: "info@rabbitpay.in.net",
+      default: "info@satyampay.in",
     },
     websitePhone: {
       type: String,

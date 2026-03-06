@@ -5,6 +5,7 @@ const bcrypt = require("bcryptjs");
 const upload = require("../middlewares/upload.middleware");
 const authController = require("../controllers/usercontroller");
 const User = require("../models/user.model"); // ✅ IMPORTANT IMPORT
+const Settings = require("../models/settings.model");
 const transporter = require("../config/mailer");
 
 // Register Route
@@ -39,6 +40,10 @@ router.post("/forgot-password", async (req, res) => {
       });
     }
 
+    // Get settings for dynamic branding
+    const settings = await Settings.findOne() || {};
+    const websiteName = settings.websiteName || 'Satyam Pay';
+
     // Generate reset token
     const resetToken = crypto.randomBytes(32).toString("hex");
     const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
@@ -56,11 +61,11 @@ router.post("/forgot-password", async (req, res) => {
     const mailOptions = {
       from: process.env.EMAIL_USER,
       to: user.email,
-      subject: "Password Reset Request - Rabbit Pay",
+      subject: `Password Reset Request - ${websiteName}`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="text-align: center; margin-bottom: 30px;">
-            <h1 style="color: #2563eb; margin: 0;">Rabbit Pay</h1>
+            <h1 style="color: #2563eb; margin: 0;">${websiteName}</h1>
           </div>
           
           <div style="background: #f8fafc; border-radius: 10px; padding: 30px; margin-bottom: 20px;">
@@ -89,7 +94,7 @@ router.post("/forgot-password", async (req, res) => {
           </div>
           
           <div style="text-align: center; color: #94a3b8; font-size: 12px;">
-            <p>© ${new Date().getFullYear()} Rabbit Pay. All rights reserved.</p>
+            <p>© ${new Date().getFullYear()} ${websiteName}. All rights reserved.</p>
           </div>
         </div>
       `
@@ -280,6 +285,90 @@ router.put("/profile/:userId", async (req, res) => {
     }
 
     res.json(updatedUser);
+
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Change Password
+router.put("/change-password/:userId", async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const { userId } = req.params;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: "Current password and new password are required" });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: "New password must be at least 6 characters" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Verify current password
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Current password is incorrect" });
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // Update password
+    user.password = hashedPassword;
+    await user.save();
+
+    res.json({ success: true, message: "Password changed successfully" });
+
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update Email
+router.put("/change-email/:userId", async (req, res) => {
+  try {
+    const { newEmail, password } = req.body;
+    const { userId } = req.params;
+
+    if (!newEmail || !password) {
+      return res.status(400).json({ message: "New email and password are required" });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(newEmail)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Verify password
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Password is incorrect" });
+    }
+
+    // Check if email already exists
+    const emailExists = await User.findOne({ email: newEmail.toLowerCase(), _id: { $ne: userId } });
+    if (emailExists) {
+      return res.status(400).json({ message: "Email already in use" });
+    }
+
+    // Update email
+    user.email = newEmail.toLowerCase();
+    await user.save();
+
+    res.json({ success: true, message: "Email updated successfully", email: user.email });
 
   } catch (error) {
     res.status(500).json({ message: error.message });

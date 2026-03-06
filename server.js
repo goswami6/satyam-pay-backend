@@ -8,6 +8,20 @@ const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || "0.0.0.0";
 const numCPUs = os.cpus().length;
 
+// ✅ Global Error Handlers - Prevent crashes
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err.message);
+  console.error(err.stack);
+  // Give time to log, then exit
+  setTimeout(() => process.exit(1), 1000);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise);
+  console.error("Reason:", reason);
+  // Don't exit for rejections, just log
+});
+
 // ✅ Use cluster mode in production for better performance
 if (process.env.NODE_ENV === "production" && cluster.isPrimary) {
   console.log(`Primary ${process.pid} is running`);

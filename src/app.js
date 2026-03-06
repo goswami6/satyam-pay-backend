@@ -5,6 +5,7 @@ const path = require("path");
 const compression = require("compression");
 const helmet = require("helmet");
 const connectDB = require("./config/db");
+const { apiRateLimit } = require("./middlewares/rateLimit.middleware");
 const withdrawRoutes = require("./routes/withdraw.routes");
 const transactionRoutes = require("./routes/transaction.routes");
 const adminBulkRoutes = require("./routes/BulkPayout.routes");
@@ -31,6 +32,9 @@ if (process.env.NODE_ENV === "production") {
     crossOriginResourcePolicy: { policy: "cross-origin" },
     contentSecurityPolicy: false
   }));
+
+  // ✅ Rate limiting in production
+  app.use("/api/", apiRateLimit);
 }
 
 // CORS Configuration for Production
@@ -101,10 +105,65 @@ app.use("/api/gateway", require("./routes/gateway.routes"));
 app.use("/api/payout-requests", require("./routes/payoutRequest.routes"));
 app.use("/api/settings", require("./routes/settings.routes"));
 app.use("/api/enquiry", require("./routes/enquiry.routes"));
+app.use("/api/notifications", require("./routes/notification.routes"));
 
 // ✅ Public API Routes (v1) - For merchant integrations
 app.use("/api/v1", require("./routes/api.v1.routes"));
 
+// ✅ 404 Handler for unknown routes
+app.use((req, res, next) => {
+  res.status(404).json({
+    success: false,
+    message: `Route ${req.originalUrl} not found`
+  });
+});
 
+// ✅ Global Error Handler - Catches all unhandled errors
+app.use((err, req, res, next) => {
+  console.error("Error:", err.message);
+  if (process.env.NODE_ENV !== "production") {
+    console.error(err.stack);
+  }
+
+  // MongoDB duplicate key error
+  if (err.code === 11000) {
+    return res.status(400).json({
+      success: false,
+      message: "Duplicate entry found"
+    });
+  }
+
+  // MongoDB validation error
+  if (err.name === "ValidationError") {
+    const messages = Object.values(err.errors).map(e => e.message);
+    return res.status(400).json({
+      success: false,
+      message: messages.join(", ")
+    });
+  }
+
+  // JWT errors
+  if (err.name === "JsonWebTokenError") {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid token"
+    });
+  }
+
+  if (err.name === "TokenExpiredError") {
+    return res.status(401).json({
+      success: false,
+      message: "Token expired"
+    });
+  }
+
+  // Default error
+  res.status(err.status || 500).json({
+    success: false,
+    message: process.env.NODE_ENV === "production"
+      ? "Something went wrong"
+      : err.message
+  });
+});
 
 module.exports = app;

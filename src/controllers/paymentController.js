@@ -2,6 +2,7 @@ const razorpay = require("../config/razorpay");
 const transporter = require("../config/mailer");
 const Transaction = require("../models/transaction.model");
 const User = require("../models/user.model");
+const Settings = require("../models/settings.model");
 const crypto = require("crypto");
 
 
@@ -19,6 +20,10 @@ exports.requestMoney = async (req, res) => {
     if (Number(amount) <= 0) {
       return res.status(400).json({ message: "Invalid amount" });
     }
+
+    // Get settings for dynamic branding
+    const settings = await Settings.findOne() || {};
+    const websiteName = settings.websiteName || 'Satyam Pay';
 
     // 1️⃣ Create Razorpay Payment Link
     const paymentLink = await razorpay.paymentLink.create({
@@ -52,7 +57,7 @@ exports.requestMoney = async (req, res) => {
     transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: email,
-      subject: "Payment Request - SatyamPay",
+      subject: `Payment Request - ${websiteName}`,
       html: `
         <h2>Payment Request</h2>
         <p>Hello ${name},</p>

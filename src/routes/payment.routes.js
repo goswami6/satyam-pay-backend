@@ -50,7 +50,7 @@ router.post("/create-order", async (req, res) => {
       receipt: "deposit_" + Date.now(),
       productinfo: "Wallet Deposit",
       firstname: "User",
-      email: "user@satyampay.com",
+      email: "user@example.com",
       flowType: "deposit",
       customerId: userId || "",
       udf1: userId || "",
@@ -118,6 +118,8 @@ router.post("/verify", async (req, res) => {
         type: "Credit",
         amount: Number(amount),
         status: "Completed",
+        category: "deposit",
+        method: "razorpay",
       });
 
       return res.json({
@@ -188,6 +190,8 @@ router.post("/payu/success", async (req, res) => {
           type: "Credit",
           amount: Number(amount),
           status: "Completed",
+          category: "deposit",
+          method: "payu",
         });
 
         return res.redirect(`${frontendUrl}/user/deposit-money?status=success&amount=${amount}`);
@@ -360,6 +364,8 @@ router.post("/cashfree/verify-return", async (req, res) => {
           type: "Credit",
           amount,
           status: "Completed",
+          category: "deposit",
+          method: "cashfree",
         });
       }
 
@@ -644,6 +650,10 @@ router.post("/generate-link", async (req, res) => {
       return res.status(400).json({ message: "All fields required" });
     }
 
+    // Get settings for dynamic branding
+    const settings = await Settings.findOne() || {};
+    const websiteName = settings.websiteName || 'Satyam Pay';
+
     // Get sender details
     const sender = await User.findById(userId);
     if (!sender) {
@@ -716,7 +726,7 @@ router.post("/generate-link", async (req, res) => {
                   <table width="100%" cellpadding="0" cellspacing="0">
                     <tr>
                       <td>
-                        <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700;">SatyamPay</h1>
+                        <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700;">${websiteName}</h1>
                         <p style="margin: 8px 0 0; color: rgba(255,255,255,0.8); font-size: 14px;">Secure Payment Request</p>
                       </td>
                       <td align="right">
@@ -825,7 +835,7 @@ router.post("/generate-link", async (req, res) => {
                     <tr>
                       <td>
                         <p style="margin: 0 0 8px; color: #64748b; font-size: 12px;">
-                          This is an automated payment request from SatyamPay.
+                          This is an automated payment request from ${websiteName}.
                         </p>
                         <p style="margin: 0; color: #94a3b8; font-size: 11px;">
                           If you did not expect this request, please ignore this email or contact support.
@@ -835,7 +845,7 @@ router.post("/generate-link", async (req, res) => {
                     <tr>
                       <td style="padding-top: 20px;">
                         <p style="margin: 0; color: #94a3b8; font-size: 11px; text-align: center;">
-                          © ${new Date().getFullYear()} SatyamPay. All rights reserved.
+                          © ${new Date().getFullYear()} ${websiteName}. All rights reserved.
                         </p>
                       </td>
                     </tr>
@@ -855,7 +865,7 @@ router.post("/generate-link", async (req, res) => {
     let emailSent = false;
     try {
       await transporter.sendMail({
-        from: `"SatyamPay" <${process.env.EMAIL_USER}>`,
+        from: `"${websiteName}" <${process.env.EMAIL_USER}>`,
         to: email,
         subject: `Payment Request from ${sender.fullName} - Rs.${Number(amount).toLocaleString('en-IN')}`,
         html: emailHTML,
